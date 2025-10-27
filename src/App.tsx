@@ -130,7 +130,49 @@ export function App() {
           <p className="mb-4">
             • <span className="font-bold">What Features Will RNDTBL Have?</span>
           </p>
-          <p className="mb-8">[In Progress...]</p>
+          <p className="mb-4">
+            <span className="font-bold">Network Graph Visualization:</span> All
+            contributions are displayed as nodes in an interactive network graph,
+            showing how different ideas and viewpoints connect. As the
+            conversation grows, patterns and relationships between concepts become
+            visible, creating a living map of collective knowledge.
+          </p>
+          <p className="mb-4">
+            <span className="font-bold">Topic-Based Organization:</span> Each
+            world problem or research area has its own dedicated space. Within
+            these spaces, multiple parallel discussions can occur simultaneously
+            without one dominating another, preserving diverse perspectives.
+          </p>
+          <p className="mb-4">
+            <span className="font-bold">Collaborative Research Tools:</span> Built-in
+            features for conducting in-depth research as a group, including shared
+            resources, citation management, and the ability to link related
+            concepts across different topics.
+          </p>
+          <p className="mb-4">
+            <span className="font-bold">DIY Project Creation:</span> Tools to
+            collaboratively design and document ecological engineering projects,
+            complete with step-by-step instructions adaptable to different
+            environments and contexts.
+          </p>
+          <p className="mb-4">
+            <span className="font-bold">Decentralized Accountability:</span> The
+            network structure makes individual contributions and their impacts
+            transparent to all participants, fostering mutual accountability
+            without traditional moderation hierarchies.
+          </p>
+          <p className="mb-4">
+            <span className="font-bold">Local Implementation Support:</span> Once
+            research produces viable solutions, the platform provides resources
+            for testing and implementing projects in physical spaces at the local
+            level.
+          </p>
+          <p className="mb-8">
+            <span className="font-bold">Equal Voice Architecture:</span> The
+            roundtable design ensures that all participants have equal standing,
+            with the network topology supporting resilient communication even if
+            connections between some members are disrupted.
+          </p>
         </div>
       </div>
     </div>;
