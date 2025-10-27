@@ -1,0 +1,438 @@
+/*
+ * RNDTBL Synchronization Specification (Z++)
+ * Defines synchronization, conflict resolution, and distributed operations
+ */
+
+use CORE_TYPES
+use GRAPH
+
+// ============================================================================
+// CRDT (Conflict-Free Replicated Data Type) Base
+// ============================================================================
+
+class CRDT[T]
+  value : T
+  replica_id : ID
+  timestamp : Timestamp
+  vector_clock : ID ↦ ℕ
+  
+  invariant
+    replica_id ∈ dom vector_clock
+    vector_clock(replica_id) ≥ 0
+    
+  // Merge two CRDT instances
+  merge(other : CRDT[T]) : CRDT[T]
+    post
+      result.vector_clock = 
+        {id : (dom self.vector_clock ∪ dom other.vector_clock) •
+          id ↦ max(self.vector_clock(id), other.vector_clock(id))}
+      
+  // Compare vector clocks
+  happensBefore(other : CRDT[T]) : 𝔹
+    return
+      ∀ id : dom self.vector_clock •
+        self.vector_clock(id) ≤ other.vector_clock(id) ∧
+      ∃ id : dom self.vector_clock •
+        self.vector_clock(id) < other.vector_clock(id)
+        
+  // Check if concurrent
+  concurrent(other : CRDT[T]) : 𝔹
+    return
+      ¬self.happensBefore(other) ∧ ¬other.happensBefore(self)
+      
+end CRDT
+
+// ============================================================================
+// LWW (Last-Write-Wins) Register
+// ============================================================================
+
+class LWWRegister extends CRDT[Content]
+  
+  // Update value
+  update(newValue : Content, replicaId : ID) : LWWRegister
+    post
+      self.value = newValue
+      self.replica_id = replicaId
+      self.timestamp = now()
+      self.vector_clock(replicaId) = self.vector_clock(replicaId) + 1
+      
+  // Merge with another register
+  override merge(other : LWWRegister) : LWWRegister
+    post
+      // Last write wins based on timestamp, then replica_id
+      result.timestamp > other.timestamp ⇒ result = self
+      result.timestamp < other.timestamp ⇒ result = other
+      result.timestamp = other.timestamp ⇒
+        (self.replica_id > other.replica_id ⇒ result = self
+         self.replica_id ≤ other.replica_id ⇒ result = other)
+      
+      // Merge vector clocks
+      result.vector_clock = 
+        {id : (dom self.vector_clock ∪ dom other.vector_clock) •
+          id ↦ max(self.vector_clock(id), other.vector_clock(id))}
+          
+end LWWRegister
+
+// ============================================================================
+// OR-Set (Observed-Remove Set)
+// ============================================================================
+
+class ORSet[T] extends CRDT[ℙ T]
+  elements : T ↦ ℙ(ID × Timestamp)  // Element → {(replica, timestamp)}
+  
+  invariant
+    value = dom elements
+    
+  // Add element
+  add(element : T, replicaId : ID) : ORSet[T]
+    post
+      let tag = (replicaId, now()) in
+        self.elements' = self.elements ⊕ 
+          {element ↦ (self.elements(element) ∪ {tag})}
+        self.vector_clock'(replicaId) = self.vector_clock(replicaId) + 1
+        
+  // Remove element
+  remove(element : T, observedTags : ℙ(ID × Timestamp)) : ORSet[T]
+    pre
+      element ∈ dom self.elements
+      observedTags ⊆ self.elements(element)
+    post
+      self.elements' = self.elements ⊕
+        {element ↦ (self.elements(element) \ observedTags)}
+        
+  // Merge two sets
+  override merge(other : ORSet[T]) : ORSet[T]
+    post
+      result.elements = 
+        {e : (dom self.elements ∪ dom other.elements) •
+          e ↦ (self.elements(e) ∪ other.elements(e))}
+      
+      // Merge vector clocks
+      result.vector_clock = 
+        {id : (dom self.vector_clock ∪ dom other.vector_clock) •
+          id ↦ max(self.vector_clock(id), other.vector_clock(id))}
+          
+end ORSet
+
+// ============================================================================
+// Synchronization Manager
+// ============================================================================
+
+class SyncManager
+  local_graph : Graph
+  replica_id : ID
+  peers : ℙ PeerConnection
+  pending_changes : seq Change
+  sync_log : seq SyncEvent
+  
+  invariant
+    replica_id ≠ null
+    
+  // Push changes to peers
+  pushChanges(peerId : ID) : Result[𝔹]
+    pre
+      ∃ p : peers • p.peer_id = peerId
+      pending_changes ≠ ⟨⟩
+    post
+      let peer = (μ p : peers • p.peer_id = peerId)
+          changes_to_send = filterChanges(pending_changes, peer.last_sync)
+      in
+        sendToPeer(peer, changes_to_send)
+        peer.last_sync' = now()
+        result.success = true
+        
+  // Pull changes from peer
+  pullChanges(peerId : ID) : Result[seq Change]
+    pre
+      ∃ p : peers • p.peer_id = peerId
+    post
+      let peer = (μ p : peers • p.peer_id = peerId)
+          remote_changes = receiveFromPeer(peer, local_graph.last_modified)
+      in
+        result.success = true
+        result.data = remote_changes
+        
+  // Apply remote changes
+  applyChanges(changes : seq Change) : Result[𝔹]
+    pre
+      changes ≠ ⟨⟩
+    post
+      ∀ c : changes •
+        applyChange(c)
+      result.success = true
+      
+  // Apply single change
+  applyChange(change : Change) : Result[𝔹]
+    post
+      change.type = create ⇒ 
+        local_graph.addNode(createNodeFromChange(change))
+        
+      change.type = update ⇒
+        let node = local_graph.nodes(change.target) in
+          resolveConflict(node, change)
+          
+      change.type = delete ⇒
+        local_graph.removeNode(change.target)
+        
+      change.type = link ⇒
+        local_graph.addEdge(createEdgeFromChange(change))
+        
+      change.type = unlink ⇒
+        local_graph.removeEdge(change.target)
+        
+      result.success = true
+      
+  // Resolve conflicting changes
+  resolveConflict(node : Node, change : Change) : Node
+    post
+      // Use LWW strategy by default
+      change.timestamp > node.metadata.modified ⇒
+        result = applyChangeToNode(node, change)
+        
+      change.timestamp < node.metadata.modified ⇒
+        result = node  // Ignore older change
+        
+      change.timestamp = node.metadata.modified ⇒
+        // Use replica_id as tiebreaker
+        change.user > node.metadata.author ⇒
+          result = applyChangeToNode(node, change)
+        change.user ≤ node.metadata.author ⇒
+          result = node
+          
+  // Full synchronization with peer
+  fullSync(peerId : ID) : Result[𝔹]
+    post
+      // Push local changes
+      pushChanges(peerId)
+      
+      // Pull remote changes
+      let remote_changes = pullChanges(peerId) in
+        applyChanges(remote_changes.data)
+        
+      // Verify consistency
+      verifyConsistency(peerId)
+      
+      result.success = true
+      
+  // Verify graph consistency with peer
+  verifyConsistency(peerId : ID) : 𝔹
+    post
+      let peer_hash = getPeerGraphHash(peerId)
+          local_hash = computeGraphHash(local_graph)
+      in
+        result = (peer_hash = local_hash)
+        
+  // Compute graph hash for consistency check
+  computeGraphHash(graph : Graph) : String
+    post
+      let node_hashes = {n : dom graph.nodes • 
+                         hash(graph.nodes(n))}
+          edge_hashes = {e : dom graph.edges • 
+                         hash(graph.edges(e))}
+      in
+        result = hash(node_hashes ∪ edge_hashes)
+        
+end SyncManager
+
+// ============================================================================
+// Peer Connection
+// ============================================================================
+
+class PeerConnection
+  peer_id : ID
+  url : String
+  status : ConnectionStatus
+  last_sync : Timestamp
+  trust_level : TrustLevel
+  sync_topics : ℙ TopicID
+  
+  invariant
+    peer_id ≠ null
+    url ≠ ""
+    
+  // Connect to peer
+  connect() : Result[𝔹]
+    pre
+      status = disconnected
+    post
+      // Establish connection
+      status' = connected
+      result.success = true
+      
+  // Disconnect from peer
+  disconnect() : Result[𝔹]
+    pre
+      status = connected
+    post
+      status' = disconnected
+      result.success = true
+      
+  // Send data to peer
+  send(data : String) : Result[𝔹]
+    pre
+      status = connected
+    post
+      // Network send operation
+      result.success = true
+      
+  // Receive data from peer
+  receive() : Result[String]
+    pre
+      status = connected
+    post
+      result.success = true
+      // result.data contains received data
+      
+end PeerConnection
+
+ConnectionStatus ::= disconnected | connecting | connected | error
+
+TrustLevel ::= 
+  | full          // Full read/write access
+  | readWrite     // Can read and contribute
+  | readOnly      // Can only read
+  | restricted    // Limited topics only
+
+// ============================================================================
+// Sync Event
+// ============================================================================
+
+class SyncEvent
+  id : ID
+  timestamp : Timestamp
+  event_type : SyncEventType
+  peer_id : ID
+  changes_count : ℕ
+  success : 𝔹
+  error : String
+  
+  invariant
+    success ⇒ error = ""
+    ¬success ⇒ error ≠ ""
+    changes_count ≥ 0
+end SyncEvent
+
+SyncEventType ::= 
+  | push_started
+  | push_completed
+  | pull_started
+  | pull_completed
+  | conflict_detected
+  | conflict_resolved
+  | sync_error
+
+// ============================================================================
+// Federation Protocol
+// ============================================================================
+
+class FederationProtocol
+  
+  // Handshake with peer
+  handshake(peer : PeerConnection) : Result[FederationAgreement]
+    post
+      // Exchange capabilities and trust levels
+      result.success = true
+      result.data.peer_id = peer.peer_id
+      result.data.supported_features = getSupportedFeatures()
+      result.data.sync_topics = peer.sync_topics
+      
+  // Negotiate sync strategy
+  negotiateSync(peer : PeerConnection) : SyncStrategy
+    post
+      peer.trust_level = full ⇒ result = bidirectional
+      peer.trust_level = readWrite ⇒ result = bidirectional
+      peer.trust_level = readOnly ⇒ result = pull_only
+      peer.trust_level = restricted ⇒ result = filtered
+      
+end FederationProtocol
+
+class FederationAgreement
+  peer_id : ID
+  supported_features : ℙ String
+  sync_topics : ℙ TopicID
+  sync_strategy : SyncStrategy
+  established : Timestamp
+end FederationAgreement
+
+SyncStrategy ::= 
+  | bidirectional  // Full two-way sync
+  | pull_only      // Only pull from peer
+  | push_only      // Only push to peer
+  | filtered       // Selective sync based on filters
+
+// ============================================================================
+// Conflict Resolution Strategies
+// ============================================================================
+
+ConflictStrategy ::=
+  | lastWriteWins      // Use timestamp to decide
+  | firstWriteWins     // Keep original
+  | manual             // Require manual resolution
+  | merge              // Attempt to merge changes
+  | custom             // Custom resolution function
+
+class ConflictResolver
+  strategy : ConflictStrategy
+  
+  // Resolve conflict between two nodes
+  resolve(local : Node, remote : Node) : Node
+    post
+      strategy = lastWriteWins ⇒
+        result = (local.metadata.modified > remote.metadata.modified) 
+                 ? local : remote
+                 
+      strategy = firstWriteWins ⇒
+        result = (local.metadata.created < remote.metadata.created)
+                 ? local : remote
+                 
+      strategy = merge ⇒
+        result = mergeNodes(local, remote)
+        
+      strategy = manual ⇒
+        result = ⊥  // Requires user intervention
+        
+  // Merge two nodes
+  mergeNodes(local : Node, remote : Node) : Node
+    post
+      // Merge content
+      result.content = mergeContent(local.content, remote.content)
+      
+      // Combine contributors
+      result.metadata.contributors = 
+        local.metadata.contributors ∪ remote.metadata.contributors
+        
+      // Use latest timestamp
+      result.metadata.modified = 
+        max(local.metadata.modified, remote.metadata.modified)
+        
+      // Increment version
+      result.metadata.version = 
+        max(local.metadata.version, remote.metadata.version) + 1
+        
+end ConflictResolver
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+// Filter changes based on last sync time
+filterChanges(changes : seq Change, since : Timestamp) : seq Change
+  post
+    result = ⟨c : changes | c.timestamp > since⟩
+
+// Create node from change
+createNodeFromChange(change : Change) : Node
+  pre
+    change.type = create
+  post
+    result.content = change.after
+    result.metadata.author = change.user
+    result.metadata.created = change.timestamp
+
+// Create edge from change  
+createEdgeFromChange(change : Change) : Edge
+  pre
+    change.type = link
+  post
+    result.metadata.author = change.user
+    result.metadata.created = change.timestamp

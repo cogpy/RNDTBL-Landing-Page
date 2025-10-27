@@ -1,0 +1,242 @@
+/*
+ * RNDTBL Core Types Specification (Z++)
+ * Defines fundamental data types and structures for the RNDTBL platform
+ */
+
+// ============================================================================
+// Basic Types
+// ============================================================================
+
+// Universally Unique Identifier
+ID ::= String
+  where
+    ∀ id : ID • length(id) = 36 ∧ isUUID(id)
+
+// Timestamp in ISO 8601 format
+Timestamp ::= String
+  where
+    ∀ t : Timestamp • isISO8601(t)
+
+// Content types
+ContentType ::= text | markdown | html | json | code
+
+// User identifier
+UserID ::= ID
+
+// Node identifier  
+NodeID ::= ID
+
+// Edge identifier
+EdgeID ::= ID
+
+// Topic identifier
+TopicID ::= ID
+
+// ============================================================================
+// Content Structure
+// ============================================================================
+
+class Content
+  type : ContentType
+  data : String
+  encoding : String
+  size : ℕ
+  hash : String
+  
+  invariant
+    size = length(data)
+    hash = sha256(data)
+end Content
+
+// ============================================================================
+// Metadata
+// ============================================================================
+
+class Metadata
+  created : Timestamp
+  modified : Timestamp
+  author : UserID
+  contributors : ℙ UserID
+  version : ℕ
+  tags : ℙ String
+  
+  invariant
+    author ∈ contributors
+    created ≤ modified
+    version ≥ 1
+    
+  init
+    version = 1
+    contributors = {author}
+end Metadata
+
+// ============================================================================
+// Position (for UI layout)
+// ============================================================================
+
+class Position
+  x : ℝ
+  y : ℝ
+  z : ℝ
+  
+  invariant
+    true  // No restrictions on position values
+end Position
+
+// ============================================================================
+// Visibility
+// ============================================================================
+
+VisibilityType ::= public | private | restricted
+
+class Visibility
+  type : VisibilityType
+  allowedUsers : ℙ UserID
+  allowedGroups : ℙ ID
+  
+  invariant
+    type = public ⇒ allowedUsers = ∅ ∧ allowedGroups = ∅
+    type = private ⇒ |allowedUsers| = 1
+    type = restricted ⇒ |allowedUsers| > 0 ∨ |allowedGroups| > 0
+end Visibility
+
+// ============================================================================
+// Link Types
+// ============================================================================
+
+LinkType ::= 
+  | relatesTo       // General relationship
+  | supports        // Supporting evidence
+  | contradicts     // Contradicting evidence
+  | dependsOn       // Dependency relationship
+  | implements      // Implementation relationship
+  | derives         // Derivation relationship
+  | references      // Citation/reference
+  | partOf          // Composition relationship
+  | prerequisite    // Prerequisite relationship
+  | alternative     // Alternative approach
+
+// ============================================================================
+// Change Types (for versioning)
+// ============================================================================
+
+ChangeType ::= 
+  | create
+  | update
+  | delete
+  | link
+  | unlink
+  | merge
+  | split
+
+class Change
+  id : ID
+  type : ChangeType
+  timestamp : Timestamp
+  user : UserID
+  target : ID
+  before : Content
+  after : Content
+  description : String
+  
+  invariant
+    type = create ⇒ before = ⊥
+    type = delete ⇒ after = ⊥
+end Change
+
+// ============================================================================
+// Search Types
+// ============================================================================
+
+SearchOperator ::= and | or | not | near | exact
+
+class SearchQuery
+  terms : seq String
+  operator : SearchOperator
+  filters : ℙ Filter
+  limit : ℕ
+  offset : ℕ
+  
+  invariant
+    limit > 0
+    offset ≥ 0
+end SearchQuery
+
+class Filter
+  field : String
+  operator : ComparisonOperator
+  value : String
+end Filter
+
+ComparisonOperator ::= eq | ne | gt | lt | ge | le | in | contains
+
+// ============================================================================
+// Result Types
+// ============================================================================
+
+class Result[T]
+  success : 𝔹
+  data : T
+  error : String
+  
+  invariant
+    success ⇒ error = ""
+    ¬success ⇒ data = ⊥
+end Result
+
+class PagedResult[T]
+  items : seq T
+  total : ℕ
+  page : ℕ
+  pageSize : ℕ
+  hasNext : 𝔹
+  
+  invariant
+    |items| ≤ pageSize
+    hasNext ⇔ page * pageSize < total
+    page ≥ 0
+    pageSize > 0
+end PagedResult
+
+// ============================================================================
+// Validation
+// ============================================================================
+
+class ValidationError
+  field : String
+  message : String
+  code : String
+end ValidationError
+
+class ValidationResult
+  valid : 𝔹
+  errors : seq ValidationError
+  
+  invariant
+    valid ⇔ errors = ⟨⟩
+end ValidationResult
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+class SystemConfig
+  maxNodeSize : ℕ
+  maxEdgesPerNode : ℕ
+  maxDepth : ℕ
+  enableVersioning : 𝔹
+  enableEncryption : 𝔹
+  
+  invariant
+    maxNodeSize > 0
+    maxEdgesPerNode > 0
+    maxDepth > 0
+end SystemConfig
+
+// Default configuration
+defaultConfig : SystemConfig
+defaultConfig.maxNodeSize = 1048576      // 1MB
+defaultConfig.maxEdgesPerNode = 1000
+defaultConfig.maxDepth = 100
+defaultConfig.enableVersioning = true
+defaultConfig.enableEncryption = false

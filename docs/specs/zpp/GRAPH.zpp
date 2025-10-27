@@ -1,0 +1,344 @@
+/*
+ * RNDTBL Graph Specification (Z++)
+ * Defines the graph structure, nodes, edges, and operations
+ */
+
+use CORE_TYPES
+
+// ============================================================================
+// Node Class
+// ============================================================================
+
+class Node
+  id : NodeID
+  content : Content
+  metadata : Metadata
+  position : Position
+  visibility : Visibility
+  topic : TopicID
+  
+  invariant
+    id ≠ null
+    content.size ≤ defaultConfig.maxNodeSize
+    
+  // Create a new node
+  create(author : UserID, topic : TopicID, content : Content) : Node
+    pre
+      author ≠ null
+      topic ≠ null
+    post
+      self.id = generateID()
+      self.content = content
+      self.metadata.author = author
+      self.metadata.created = now()
+      self.metadata.modified = now()
+      self.topic = topic
+  
+  // Update node content
+  update(user : UserID, newContent : Content) : Result[Node]
+    pre
+      user ∈ self.metadata.contributors ∨ canEdit(user, self)
+      newContent.size ≤ defaultConfig.maxNodeSize
+    post
+      self.content = newContent
+      self.metadata.modified = now()
+      self.metadata.version = self.metadata.version + 1
+      self.metadata.contributors = self.metadata.contributors ∪ {user}
+  
+  // Check if user can view this node
+  canView(user : UserID) : 𝔹
+    return
+      self.visibility.type = public ∨
+      user ∈ self.visibility.allowedUsers ∨
+      ∃ g ∈ self.visibility.allowedGroups • user ∈ groupMembers(g)
+  
+  // Check if user can edit this node
+  canEdit(user : UserID) : 𝔹
+    return
+      user = self.metadata.author ∨
+      user ∈ self.metadata.contributors
+      
+  // Get node summary
+  getSummary() : String
+    return substring(self.content.data, 0, 200) + "..."
+    
+end Node
+
+// ============================================================================
+// Edge Class
+// ============================================================================
+
+class Edge
+  id : EdgeID
+  source : NodeID
+  target : NodeID
+  type : LinkType
+  weight : ℝ
+  metadata : Metadata
+  bidirectional : 𝔹
+  
+  invariant
+    id ≠ null
+    source ≠ null
+    target ≠ null
+    source ≠ target
+    weight ≥ 0.0 ∧ weight ≤ 1.0
+    
+  // Create a new edge
+  create(source : NodeID, target : NodeID, type : LinkType, 
+         author : UserID, bidirectional : 𝔹) : Edge
+    pre
+      source ≠ target
+      nodeExists(source)
+      nodeExists(target)
+    post
+      self.id = generateID()
+      self.source = source
+      self.target = target
+      self.type = type
+      self.metadata.author = author
+      self.metadata.created = now()
+      self.weight = 1.0
+      self.bidirectional = bidirectional
+      
+  // Update edge weight
+  updateWeight(newWeight : ℝ) : Result[Edge]
+    pre
+      newWeight ≥ 0.0 ∧ newWeight ≤ 1.0
+    post
+      self.weight = newWeight
+      self.metadata.modified = now()
+      
+  // Reverse edge direction
+  reverse() : Edge
+    post
+      result.source = self.target
+      result.target = self.source
+      result.type = self.type
+      result.bidirectional = self.bidirectional
+      
+end Edge
+
+// ============================================================================
+// Graph Class
+// ============================================================================
+
+class Graph
+  nodes : NodeID ↦ Node
+  edges : EdgeID ↦ Edge
+  adjacencyList : NodeID ↦ ℙ EdgeID
+  config : SystemConfig
+  
+  invariant
+    // All edges reference existing nodes
+    ∀ e : EdgeID • e ∈ dom edges ⇒
+      edges(e).source ∈ dom nodes ∧
+      edges(e).target ∈ dom nodes
+      
+    // Adjacency list is consistent with edges
+    ∀ n : NodeID • n ∈ dom adjacencyList ⇒
+      ∀ e : EdgeID • e ∈ adjacencyList(n) ⇒
+        edges(e).source = n ∨ (edges(e).target = n ∧ edges(e).bidirectional)
+        
+    // Node degree constraint
+    ∀ n : NodeID • n ∈ dom adjacencyList ⇒
+      |adjacencyList(n)| ≤ config.maxEdgesPerNode
+      
+  // Initialize empty graph
+  init
+    nodes = ∅
+    edges = ∅
+    adjacencyList = ∅
+    config = defaultConfig
+    
+  // Add a node to the graph
+  addNode(node : Node) : Result[NodeID]
+    pre
+      node.id ∉ dom nodes
+    post
+      nodes' = nodes ⊕ {node.id ↦ node}
+      adjacencyList' = adjacencyList ⊕ {node.id ↦ ∅}
+      result.success = true
+      result.data = node.id
+      
+  // Remove a node from the graph
+  removeNode(nodeId : NodeID) : Result[𝔹]
+    pre
+      nodeId ∈ dom nodes
+    post
+      // Remove all edges connected to this node
+      ∀ e : EdgeID • e ∈ dom edges ∧ 
+        (edges(e).source = nodeId ∨ edges(e).target = nodeId) ⇒
+        e ∉ dom edges'
+        
+      // Remove node and its adjacency list
+      nodes' = {nodeId} ⩤ nodes
+      adjacencyList' = {nodeId} ⩤ adjacencyList
+      result.success = true
+      
+  // Add an edge to the graph
+  addEdge(edge : Edge) : Result[EdgeID]
+    pre
+      edge.id ∉ dom edges
+      edge.source ∈ dom nodes
+      edge.target ∈ dom nodes
+      |adjacencyList(edge.source)| < config.maxEdgesPerNode
+    post
+      edges' = edges ⊕ {edge.id ↦ edge}
+      adjacencyList' = adjacencyList ⊕ 
+        {edge.source ↦ (adjacencyList(edge.source) ∪ {edge.id})}
+      result.success = true
+      result.data = edge.id
+      
+  // Remove an edge from the graph
+  removeEdge(edgeId : EdgeID) : Result[𝔹]
+    pre
+      edgeId ∈ dom edges
+    post
+      let e = edges(edgeId) in
+        adjacencyList' = adjacencyList ⊕
+          {e.source ↦ (adjacencyList(e.source) \ {edgeId})}
+        edges' = {edgeId} ⩤ edges
+        result.success = true
+      
+  // Get all neighbors of a node
+  getNeighbors(nodeId : NodeID) : ℙ NodeID
+    pre
+      nodeId ∈ dom nodes
+    post
+      result = {n : NodeID | 
+        ∃ e : EdgeID • e ∈ adjacencyList(nodeId) ∧
+        (edges(e).target = n ∨ (edges(e).source = n ∧ edges(e).bidirectional))}
+        
+  // Find shortest path between two nodes (BFS)
+  shortestPath(source : NodeID, target : NodeID) : seq NodeID
+    pre
+      source ∈ dom nodes
+      target ∈ dom nodes
+    post
+      // Path exists and is shortest
+      result ≠ ⟨⟩ ⇒
+        head(result) = source ∧
+        last(result) = target ∧
+        ∀ i : 1..len(result)-1 • result[i+1] ∈ getNeighbors(result[i]) ∧
+        ∀ p : seq NodeID • isPath(p, source, target) ⇒ len(result) ≤ len(p)
+      
+      // No path exists
+      result = ⟨⟩ ⇒ ¬reachable(source, target)
+      
+  // Check if target is reachable from source
+  reachable(source : NodeID, target : NodeID) : 𝔹
+    return
+      source = target ∨
+      ∃ n : NodeID • n ∈ getNeighbors(source) ∧ reachable(n, target)
+      
+  // Get subgraph containing specific nodes
+  subgraph(nodeIds : ℙ NodeID) : Graph
+    pre
+      nodeIds ⊆ dom nodes
+    post
+      result.nodes = nodeIds ◁ nodes
+      result.edges = {e : EdgeID | 
+        edges(e).source ∈ nodeIds ∧ edges(e).target ∈ nodeIds} ◁ edges
+      result.adjacencyList = nodeIds ◁ adjacencyList
+      
+  // Calculate clustering coefficient
+  clusteringCoefficient(nodeId : NodeID) : ℝ
+    pre
+      nodeId ∈ dom nodes
+    post
+      let neighbors = getNeighbors(nodeId)
+          k = |neighbors|
+          connections = |{(n1, n2) : neighbors × neighbors | 
+                          n1 ≠ n2 ∧ n2 ∈ getNeighbors(n1)}|
+      in
+        k ≤ 1 ⇒ result = 0.0
+        k > 1 ⇒ result = connections / (k * (k - 1))
+        
+  // Calculate betweenness centrality
+  betweennessCentrality(nodeId : NodeID) : ℝ
+    pre
+      nodeId ∈ dom nodes
+    post
+      // Number of shortest paths through this node
+      let allPaths = {(s, t) : (dom nodes × dom nodes) | 
+                      s ≠ t ∧ s ≠ nodeId ∧ t ≠ nodeId}
+          pathsThrough = |{(s, t) : allPaths | 
+                          nodeId ∈ shortestPath(s, t)}|
+      in
+        result = pathsThrough / |allPaths|
+        
+  // Find strongly connected components
+  stronglyConnectedComponents() : ℙ(ℙ NodeID)
+    post
+      // Each component is strongly connected
+      ∀ c : result •
+        ∀ n1, n2 : c • n1 ≠ n2 ⇒ 
+          reachable(n1, n2) ∧ reachable(n2, n1)
+      
+      // Components are maximal
+      ∀ c1, c2 : result • c1 ≠ c2 ⇒ c1 ∩ c2 = ∅
+      
+      // All nodes are in exactly one component
+      ⋃ result = dom nodes
+      
+  // Detect cycles
+  hasCycle() : 𝔹
+    return
+      ∃ n : dom nodes • 
+        ∃ path : seq NodeID • 
+          len(path) > 1 ∧
+          head(path) = n ∧
+          last(path) = n ∧
+          isPath(path, n, n)
+          
+  // Graph validation
+  validate() : ValidationResult
+    post
+      result.valid ⇔
+        // All edge endpoints exist
+        (∀ e : dom edges • 
+          edges(e).source ∈ dom nodes ∧ 
+          edges(e).target ∈ dom nodes) ∧
+        // Adjacency list is consistent
+        (∀ n : dom adjacencyList •
+          ∀ e : adjacencyList(n) • e ∈ dom edges) ∧
+        // No self-loops
+        (∀ e : dom edges • edges(e).source ≠ edges(e).target) ∧
+        // Degree constraints satisfied
+        (∀ n : dom adjacencyList • 
+          |adjacencyList(n)| ≤ config.maxEdgesPerNode)
+          
+end Graph
+
+// ============================================================================
+// Graph Operations
+// ============================================================================
+
+// Merge two graphs
+merge(g1 : Graph, g2 : Graph) : Graph
+  post
+    result.nodes = g1.nodes ⊕ g2.nodes
+    result.edges = g1.edges ⊕ g2.edges
+    // Rebuild adjacency list
+    ∀ n : dom result.nodes •
+      result.adjacencyList(n) = 
+        {e : dom result.edges | result.edges(e).source = n}
+
+// Graph union
+union(g1 : Graph, g2 : Graph) : Graph
+  post
+    result.nodes = g1.nodes ∪ g2.nodes
+    result.edges = g1.edges ∪ g2.edges
+
+// Graph intersection  
+intersection(g1 : Graph, g2 : Graph) : Graph
+  post
+    result.nodes = g1.nodes ∩ g2.nodes
+    result.edges = g1.edges ∩ g2.edges
+
+// Graph difference
+difference(g1 : Graph, g2 : Graph) : Graph
+  post
+    result.nodes = g1.nodes \ g2.nodes
+    result.edges = g1.edges \ g2.edges
