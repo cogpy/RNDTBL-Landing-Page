@@ -1,0 +1,429 @@
+/*
+ * RNDTBL Namespace Specification (Z++)
+ * Defines Plan9-inspired namespace model for distributed cognition
+ */
+
+use CORE_TYPES
+use GRAPH
+
+// ============================================================================
+// File System Abstraction
+// ============================================================================
+
+// File types in the namespace
+FileType ::= regular | directory | symlink | special
+
+class File
+  path : String
+  type : FileType
+  size : ℕ
+  permissions : Permissions
+  owner : UserID
+  created : Timestamp
+  modified : Timestamp
+  content : Content
+  
+  invariant
+    path ≠ ""
+    type = directory ⇒ size = 0
+    type = regular ⇒ content ≠ ⊥
+    size ≥ 0
+    
+  // Read file content
+  read(offset : ℕ, count : ℕ) : Result[String]
+    pre
+      type = regular
+      offset ≤ size
+    post
+      result.success = true
+      result.data = substring(content.data, offset, offset + count)
+      
+  // Write file content
+  write(offset : ℕ, data : String) : Result[ℕ]
+    pre
+      type = regular
+      hasPermission(current_user, self, write)
+    post
+      self.content.data' = 
+        substring(self.content.data, 0, offset) + 
+        data + 
+        substring(self.content.data, offset + |data|, size)
+      self.modified' = now()
+      self.size' = |self.content.data'|
+      result.success = true
+      result.data = |data|
+      
+end File
+
+class Permissions
+  owner_read : 𝔹
+  owner_write : 𝔹
+  owner_exec : 𝔹
+  group_read : 𝔹
+  group_write : 𝔹
+  group_exec : 𝔹
+  other_read : 𝔹
+  other_write : 𝔹
+  other_exec : 𝔹
+  
+  // Convert to Unix-style mode
+  toMode() : ℕ
+    post
+      result = 
+        (owner_read ? 400 : 0) +
+        (owner_write ? 200 : 0) +
+        (owner_exec ? 100 : 0) +
+        (group_read ? 40 : 0) +
+        (group_write ? 20 : 0) +
+        (group_exec ? 10 : 0) +
+        (other_read ? 4 : 0) +
+        (other_write ? 2 : 0) +
+        (other_exec ? 1 : 0)
+        
+end Permissions
+
+// ============================================================================
+// Namespace Structure
+// ============================================================================
+
+class Namespace
+  root : String
+  files : String ↦ File
+  mounts : String ↦ Namespace
+  
+  invariant
+    "/" ∈ dom files
+    files("/").type = directory
+    
+    // All parent directories exist
+    ∀ path : dom files •
+      parentPath(path) ∈ dom files ∨ parentPath(path) = ""
+      
+    // No cycles in mounts
+    ¬∃ path : dom mounts • mountCycle(path, mounts(path))
+    
+  // Look up file by path
+  lookup(path : String) : Result[File]
+    post
+      path ∈ dom files ⇒
+        result.success = true ∧ result.data = files(path)
+        
+      path ∉ dom files ⇒
+        // Check if path is in mounted namespace
+        let mount_point = longestMountPrefix(path) in
+          mount_point ≠ "" ⇒
+            let relative_path = path - mount_point in
+              result = mounts(mount_point).lookup(relative_path)
+          mount_point = "" ⇒
+            result.success = false ∧ result.error = "File not found"
+            
+  // Create file
+  create(path : String, type : FileType, content : Content) : Result[File]
+    pre
+      path ∉ dom files
+      parentPath(path) ∈ dom files
+      files(parentPath(path)).type = directory
+    post
+      let new_file = File in
+        new_file.path = path
+        new_file.type = type
+        new_file.content = content
+        new_file.owner = current_user
+        new_file.created = now()
+        new_file.modified = now()
+        files' = files ⊕ {path ↦ new_file}
+        result.success = true
+        result.data = new_file
+        
+  // Delete file
+  delete(path : String) : Result[𝔹]
+    pre
+      path ∈ dom files
+      path ≠ "/"
+      // Cannot delete non-empty directory
+      files(path).type = directory ⇒
+        ¬∃ p : dom files • parentPath(p) = path
+    post
+      files' = {path} ⩤ files
+      result.success = true
+      
+  // Mount another namespace
+  mount(path : String, ns : Namespace) : Result[𝔹]
+    pre
+      path ∈ dom files
+      files(path).type = directory
+      path ∉ dom mounts
+    post
+      mounts' = mounts ⊕ {path ↦ ns}
+      result.success = true
+      
+  // Unmount namespace
+  unmount(path : String) : Result[𝔹]
+    pre
+      path ∈ dom mounts
+    post
+      mounts' = {path} ⩤ mounts
+      result.success = true
+      
+end Namespace
+
+// ============================================================================
+// RNDTBL Namespace Mapping
+// ============================================================================
+
+class RNDTBLNamespace extends Namespace
+  graph : Graph
+  
+  invariant
+    // Standard directory structure
+    "/graph" ∈ dom files
+    "/graph/nodes" ∈ dom files
+    "/graph/edges" ∈ dom files
+    "/users" ∈ dom files
+    "/sync" ∈ dom files
+    
+  init
+    root = "/rndtbl"
+    createStandardStructure()
+    
+  // Create standard directory structure
+  createStandardStructure()
+    post
+      files' = files ⊕
+        {"/graph" ↦ createDirectory("/graph")} ⊕
+        {"/graph/nodes" ↦ createDirectory("/graph/nodes")} ⊕
+        {"/graph/edges" ↦ createDirectory("/graph/edges")} ⊕
+        {"/graph/topics" ↦ createDirectory("/graph/topics")} ⊕
+        {"/users" ↦ createDirectory("/users")} ⊕
+        {"/sync" ↦ createDirectory("/sync")} ⊕
+        {"/meta" ↦ createDirectory("/meta")}
+        
+  // Map graph node to file
+  nodeToFile(node : Node) : File
+    post
+      result.path = "/graph/nodes/" + node.id + "/data"
+      result.type = regular
+      result.content = node.content
+      result.size = node.content.size
+      result.owner = node.metadata.author
+      result.created = node.metadata.created
+      result.modified = node.metadata.modified
+      
+  // Map file to graph node
+  fileToNode(file : File) : Node
+    pre
+      file.path matches "/graph/nodes/([^/]+)/data"
+    post
+      result.content = file.content
+      result.metadata.author = file.owner
+      result.metadata.created = file.created
+      result.metadata.modified = file.modified
+      
+  // Override lookup to handle dynamic graph files
+  override lookup(path : String) : Result[File]
+    post
+      // Static files
+      path ∈ dom files ⇒
+        result = super.lookup(path)
+        
+      // Dynamic node files
+      path matches "/graph/nodes/([^/]+)/data" ⇒
+        let node_id = extractNodeId(path) in
+          node_id ∈ dom graph.nodes ⇒
+            result.success = true ∧
+            result.data = nodeToFile(graph.nodes(node_id))
+          node_id ∉ dom graph.nodes ⇒
+            result.success = false ∧
+            result.error = "Node not found"
+            
+      // Dynamic edge files
+      path matches "/graph/edges/([^/]+)/data" ⇒
+        let edge_id = extractEdgeId(path) in
+          edge_id ∈ dom graph.edges ⇒
+            result.success = true ∧
+            result.data = edgeToFile(graph.edges(edge_id))
+          edge_id ∉ dom graph.edges ⇒
+            result.success = false ∧
+            result.error = "Edge not found"
+            
+  // Handle write to node file
+  writeNode(node_id : NodeID, content : Content) : Result[𝔹]
+    pre
+      node_id ∈ dom graph.nodes
+    post
+      graph.nodes(node_id).content' = content
+      graph.nodes(node_id).metadata.modified' = now()
+      result.success = true
+      
+end RNDTBLNamespace
+
+// ============================================================================
+// 9P Protocol Interface
+// ============================================================================
+
+// 9P message types
+MessageType ::= 
+  | Tversion | Rversion
+  | Tauth | Rauth
+  | Tattach | Rattach
+  | Tflush | Rflush
+  | Twalk | Rwalk
+  | Topen | Ropen
+  | Tcreate | Rcreate
+  | Tread | Rread
+  | Twrite | Rwrite
+  | Tclunk | Rclunk
+  | Tremove | Rremove
+  | Tstat | Rstat
+  | Twstat | Rwstat
+
+class NinePMessage
+  type : MessageType
+  tag : ℕ
+  fid : ℕ
+  data : String
+  
+  invariant
+    tag ≥ 0 ∧ tag < 65536
+    fid ≥ 0
+end NinePMessage
+
+class NinePServer
+  namespace : RNDTBLNamespace
+  fids : ℕ ↦ String  // fid → path mapping
+  connections : ℕ ↦ Connection
+  
+  // Handle incoming 9P message
+  handleMessage(msg : NinePMessage) : NinePMessage
+    post
+      msg.type = Tversion ⇒ result = handleVersion(msg)
+      msg.type = Tattach ⇒ result = handleAttach(msg)
+      msg.type = Twalk ⇒ result = handleWalk(msg)
+      msg.type = Topen ⇒ result = handleOpen(msg)
+      msg.type = Tread ⇒ result = handleRead(msg)
+      msg.type = Twrite ⇒ result = handleWrite(msg)
+      msg.type = Tclunk ⇒ result = handleClunk(msg)
+      msg.type = Tstat ⇒ result = handleStat(msg)
+      
+  // Handle Tread - read file
+  handleRead(msg : NinePMessage) : NinePMessage
+    pre
+      msg.fid ∈ dom fids
+    post
+      let path = fids(msg.fid)
+          file_result = namespace.lookup(path)
+      in
+        file_result.success ⇒
+          result.type = Rread ∧
+          result.tag = msg.tag ∧
+          result.data = file_result.data.read(offset, count).data
+        ¬file_result.success ⇒
+          result.type = Rerror ∧
+          result.data = file_result.error
+          
+  // Handle Twrite - write file
+  handleWrite(msg : NinePMessage) : NinePMessage
+    pre
+      msg.fid ∈ dom fids
+    post
+      let path = fids(msg.fid)
+          file_result = namespace.lookup(path)
+      in
+        file_result.success ⇒
+          let write_result = file_result.data.write(offset, msg.data) in
+            result.type = Rwrite ∧
+            result.tag = msg.tag ∧
+            result.data = write_result.data
+        ¬file_result.success ⇒
+          result.type = Rerror ∧
+          result.data = file_result.error
+          
+  // Handle Twalk - navigate path
+  handleWalk(msg : NinePMessage) : NinePMessage
+    pre
+      msg.fid ∈ dom fids
+    post
+      let current_path = fids(msg.fid)
+          walk_elements = splitPath(msg.data)
+          new_path = resolvePath(current_path, walk_elements)
+      in
+        namespace.lookup(new_path).success ⇒
+          result.type = Rwalk ∧
+          result.tag = msg.tag ∧
+          fids'(msg.fid) = new_path
+        ¬namespace.lookup(new_path).success ⇒
+          result.type = Rerror ∧
+          result.data = "File not found"
+          
+end NinePServer
+
+// ============================================================================
+// Union Mount (Namespace Composition)
+// ============================================================================
+
+class UnionNamespace extends Namespace
+  layers : seq Namespace
+  
+  invariant
+    |layers| > 0
+    
+  // Lookup in union - search all layers
+  override lookup(path : String) : Result[File]
+    post
+      // Search from top layer to bottom
+      let results = ⟨ns : layers • ns.lookup(path)⟩ in
+        ∃ r : results • r.success ⇒
+          result = (μ r : results • r.success)
+        ∀ r : results • ¬r.success ⇒
+          result.success = false ∧
+          result.error = "File not found in any layer"
+          
+  // List directory - merge from all layers
+  listDirectory(path : String) : ℙ String
+    post
+      result = ⋃ {ns : layers • ns.listDirectory(path)}
+      
+  // Write goes to top layer only
+  override create(path : String, type : FileType, content : Content) : Result[File]
+    post
+      result = head(layers).create(path, type, content)
+      
+end UnionNamespace
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+// Extract parent path
+parentPath(path : String) : String
+  post
+    path = "/" ⇒ result = ""
+    path ≠ "/" ⇒ result = substring(path, 0, lastIndexOf(path, "/"))
+
+// Check for mount cycles
+mountCycle(path : String, ns : Namespace) : 𝔹
+  post
+    result = path ∈ dom ns.mounts ∧
+             (mountCycle(path, ns.mounts(path)) ∨
+              ∃ mp : dom ns.mounts • mountCycle(mp, ns.mounts(mp)))
+
+// Find longest mount prefix
+longestMountPrefix(path : String, mounts : String ↦ Namespace) : String
+  post
+    result = max({mp : dom mounts | path.startsWith(mp) • mp})
+
+// Split path into components
+splitPath(path : String) : seq String
+  post
+    result = split(path, "/")
+
+// Resolve path with walk elements
+resolvePath(base : String, elements : seq String) : String
+  post
+    elements = ⟨⟩ ⇒ result = base
+    head(elements) = ".." ⇒ 
+      result = resolvePath(parentPath(base), tail(elements))
+    head(elements) = "." ⇒
+      result = resolvePath(base, tail(elements))
+    otherwise ⇒
+      result = resolvePath(base + "/" + head(elements), tail(elements))
